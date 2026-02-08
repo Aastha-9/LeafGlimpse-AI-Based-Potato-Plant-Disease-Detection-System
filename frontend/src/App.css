@@ -1,0 +1,144 @@
+/* ==========================
+   Global Styles
+========================== */
+body {
+  font-family: Arial, sans-serif;
+  background: #f0fdf4;
+  margin: 0;
+  padding: 0;
+  color: #111827;
+}
+
+h1, h2, h3, h4, h5 {
+  margin: 0.5em 0;
+}
+
+/* ==========================
+   App Container
+========================== */
+.App {
+  text-align: center;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 20px;
+}
+
+/* ==========================
+   Header & Logo
+========================== */
+.App-header {
+  width: 100%;
+  background-color: #16a34a; /* Green header */
+  padding: 20px 0;
+  color: white;
+  font-size: 2rem;
+  font-weight: bold;
+}
+
+.App-logo {
+  height: 80px;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .App-logo {
+    animation: App-logo-spin infinite 20s linear;
+  }
+}
+
+@keyframes App-logo-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ==========================
+   Form Container
+========================== */
+.container {
+  width: 400px;
+  max-width: 90%;
+  margin: 20px auto;
+  text-align: center;
+  padding: 20px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+/* ==========================
+   Image Preview
+========================== */
+.preview {
+  width: 200px;
+  height: 200px;
+  object-fit: cover;
+  margin: 10px 0;
+  border-radius: 10px;
+  border: 2px solid #16a34a;
+}
+
+/* ==========================
+   Buttons
+========================== */
+button {
+  background: #16a34a;
+  color: white;
+  padding: 10px 25px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  margin: 10px 0;
+  transition: all 0.3s ease;
+}
+
+button:hover {
+  background: #15803d; /* Slightly darker green */
+}
+
+/* ==========================
+   Result Card
+========================== */
+.result-card {
+  background: white;
+  padding: 20px;
+  margin-top: 20px;
+  border-radius: 12px;
+  box-shadow: 0px 4px 15px rgba(0,0,0,0.1);
+  text-align: left;
+}
+
+.result-card h2 {
+  color: #16a34a;
+  margin-bottom: 10px;
+}
+
+.result-card p {
+  margin: 5px 0;
+}
+
+/* ==========================
+   Dropdown / Select
+========================== */
+select {
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  font-size: 1rem;
+  margin-bottom: 15px;
+}
+
+/* ==========================
+   Footer / Links
+========================== */
+.App-link {
+  color: #16a34a;
+  text-decoration: none;
+}
+
+.App-link:hover {
+  text-decoration: underline;
+}

@@ -1,0 +1,14 @@
+.ipynb_checkpoints/
+.idea/
+anaconda_projects/
+node_modules/
+models/
+__pycache__/
+*.h5
+*.pth
+*.pt
+.env
+Training/
+*.jpg
+*.jpeg
+*.png
