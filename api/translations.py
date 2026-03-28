@@ -9,10 +9,9 @@ translations = {
         "hi": "आलू का पौधा स्वस्थ है।",
         "mr": "बटाट्याचे झाड निरोगी आहे."
     },
-    "Potato__Late_blight" : {
-      "en": "Late blight disease detected in potato plant.",
-      "hi": "आलू के पौधे में लेट ब्लाइट रोग पाया गया है।",
-      "mr": "बटाट्याच्या झाडावर लेट ब्लाइट रोग आढळला आहे."
-        
+    "Potato___Late_blight": {
+        "en": "Late blight disease detected in potato plant.",
+        "hi": "आलू के पौधे में लेट ब्लाइट रोग पाया गया है।",
+        "mr": "बटाट्याच्या झाडावर लेट ब्लाइट रोग आढळला आहे."
     }
 }
