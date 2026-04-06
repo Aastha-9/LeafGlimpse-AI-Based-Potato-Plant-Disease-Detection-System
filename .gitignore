@@ -13,3 +13,4 @@ Training/
 *.png
 
 /models/1/
+tools/ngrok.exe
