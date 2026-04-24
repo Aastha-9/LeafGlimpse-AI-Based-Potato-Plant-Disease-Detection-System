@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: leafglimpse
+    runtime: python
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: cd api && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false # User will need to provide this in Render dashboard
+      - key: PYTHON_VERSION
+        value: 3.10.0
