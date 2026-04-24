@@ -6,7 +6,7 @@ const Navbar = ({ language, setLanguage }) => {
     <nav className="navbar">
       <div className="nav-brand">
         <Sprout size={32} color="var(--primary-dark)" />
-        Potato Disease AI
+        LeafGlimpse
       </div>
       <div className="nav-controls">
         <select value={language} onChange={(e) => setLanguage(e.target.value)}>

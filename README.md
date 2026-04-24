@@ -1,4 +1,4 @@
-# 🌿 Smart Detection of Diseases in Potato Leaves Using AI
+# 🌿 LeafGlimpse: AI Based Potato Plant Disease Detection System
 
 [![GitHub Repository](https://img.shields.io/badge/GitHub-Potato--Disease--AI-green?logo=github)](https://github.com/Aastha-9/Smart-Detection-of-Diseases-in-Potato-Leaves-Using-AI)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-blue?logo=fastapi)](https://fastapi.tiangolo.com/)

@@ -3,7 +3,7 @@ import React from 'react';
 const Hero = ({ language }) => {
   const content = {
     en: {
-      title: "Smart Detection of Diseases in Potato Leaves Using AI",
+      title: "LeafGlimpse: AI Based Potato Plant Disease Detection System",
       subtitle: "Upload a clear image of your plant's leaf, and our advanced AI will instantly identify diseases and provide expert remedies."
     },
     hi: {
