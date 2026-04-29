@@ -36,10 +36,10 @@ def get_model(mode="chat"):
     if MODEL_CACHE[mode]:
         return MODEL_CACHE[mode]
 
-    # Priority defaults
+    # Priority defaults - Use 1.5 Flash for best stability and free-tier quotas
     defaults = {
         "chat": ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"],
-        "vision": ["gemini-1.5-flash", "gemini-1.5-flash-latest"] # Removed experimental models to avoid low quotas
+        "vision": ["gemini-1.5-flash", "gemini-1.5-flash-latest"] 
     }
 
 
@@ -47,8 +47,7 @@ def get_model(mode="chat"):
     for model_name in defaults[mode]:
         try:
             m = genai.GenerativeModel(model_name)
-            # Test it briefly
-            m.generate_content("test", generation_config={"max_output_tokens": 1})
+            # We skip the test generation to save quota
             MODEL_CACHE[mode] = m
             print(f"Successfully loaded '{model_name}' for {mode} mode.", flush=True)
             return m
@@ -132,17 +131,24 @@ async def chat_endpoint(request: ChatRequest, lang: str = Query("en")):
     try:
         # Get a working model dynamically
         model = get_model("chat")
-        response = model.generate_content(
-            f"You are a highly knowledgeable agricultural AI assistant. You MUST reply ONLY in the {target_lang} language! Answer the user's question clearly and concisely: {request.message}"
-        )
+        chat = model.start_chat(history=[])
+        query = f"You are a highly knowledgeable agricultural AI assistant. You MUST reply ONLY in the {target_lang} language! Answer the user's question clearly and concisely: {request.message}"
+        response = chat.send_message(query)
         return {"reply": response.text}
     except Exception as e:
-        error_msg = f"I'm sorry, I'm having trouble connecting to my agricultural brain right now. {e}"
-        if lang == "hi":
-            error_msg = f"मुझे खेद है, मुझे अभी अपने कृषि नेटवर्क से जुड़ने में समस्या हो रही है। {e}"
-        elif lang == "mr":
-            error_msg = f"क्षमस्व, मला आता माझ्या कृषी नेटवर्कशी कनेक्ट होण्यास अडचण येत आहे. {e}"
-        return {"reply": error_msg}
+        error_msg = str(e)
+        print(f"Chatbot Error: {error_msg}", flush=True)
+        
+        # Handle Quota Exceeded (429) specifically
+        if "429" in error_msg or "quota" in error_msg.lower():
+            friendly_msgs = {
+                "en": "I've answered so many questions today that I need a quick rest! Please try again in a few minutes.",
+                "hi": "मैंने आज इतने सारे सवालों के जवाब दिए हैं कि मुझे थोड़ी देर आराम की ज़रूरत है! कृपया कुछ मिनटों बाद फिर से प्रयास करें।",
+                "mr": "मी आज इतक्या प्रश्नांची उत्तरे दिली आहेत की मला थोड्या विश्रांतीची गरज आहे! कृपया काही मिनिटांनंतर पुन्हा प्रयत्न करा."
+            }
+            return {"reply": friendly_msgs.get(lang, friendly_msgs["en"])}
+            
+        return {"reply": "I'm sorry, I'm having trouble connecting to my agricultural brain right now. Please try again later."}
 
 @app.get("/blogs")
 def get_blogs(lang: str = Query("en")):
