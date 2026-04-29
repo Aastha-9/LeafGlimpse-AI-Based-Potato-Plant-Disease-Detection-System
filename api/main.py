@@ -280,28 +280,21 @@ async def predict(
     color_std = np.std(img_np)
     
     # Heuristic for "Invalid Image"
-    # Real leaves are green (avg_exg > 10), high-texture (std > 30), and rarely mostly white
-    is_not_green = avg_exg < 10.0 and not is_colorless # If it has color, it should be green
-    is_document = white_ratio > 0.35 or color_std < 30.0
+    # Real leaves are green (avg_exg > 0), but diseased ones can be brown (lower ExG).
+    # We only reject if it's extremely unlikely to be a leaf.
+    is_not_green = avg_exg < -30.0 and not is_colorless 
+    is_document = white_ratio > 0.60 or color_std < 15.0
     
     print(f"DEBUG: white_ratio={white_ratio:.4f}, avg_exg={avg_exg:.4f}, color_std={color_std:.4f}, is_colorless={is_colorless}", flush=True)
     
     if is_colorless or is_document or is_not_green:
-        msg = "The image does not appear to be a plant leaf."
-        if is_colorless:
-            msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
-        elif is_document:
-            msg = "The image appears to be a document or diagram, not a real plant leaf."
-        elif is_not_green:
-            msg = "The image colors do not match a typical plant leaf. Please upload a clear photo of a green leaf."
-
-
-
         msg = "The image appears to be a drawing, document, or non-leaf diagram."
         if is_colorless:
             msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
         elif is_document:
             msg = "The image appears to be a document or diagram with a white background, not a real plant leaf."
+        elif is_not_green:
+            msg = "The image colors do not match a typical plant leaf (even a diseased one). Please upload a clear photo of a leaf."
             
         recoms = [
             "Ensure the photo is a real photograph of a plant leaf.",
@@ -345,11 +338,10 @@ async def predict(
     async def validate_image():
         try:
             prompt = (
-                "Look at this low-res image. "
-                "Is this a picture that prominently features a potato leaf? "
-                "If it IS a potato leaf, reply ONLY with the exact word 'POTATO'. "
-                "If it is a leaf of a different plant, reply with the exact plant name (e.g., 'Tomato leaf', 'Oak leaf'). "
-                "If it is not a leaf at all, reply 'NOT A LEAF'."
+                "Analyze this image of a potato leaf. "
+                "1. Is this a real potato leaf? (If not, reply 'NOT A LEAF'). "
+                "2. If it IS a potato leaf, identify if it has 'Early Blight' (small concentric spots), 'Late Blight' (large dark brown/black water-soaked lesions), or is 'Healthy'. "
+                "Reply in the format: VERDICT: [POTATO/NOT A LEAF] | DISEASE: [Early Blight/Late Blight/Healthy/Unknown]"
             )
             # 1. Get a working vision model dynamically
             model_engine = get_model("vision")
@@ -374,7 +366,8 @@ async def predict(
                 print(f"Gemini response blocked or empty. Reason: {resp.candidates[0].finish_reason if resp.candidates else 'No candidates'}", flush=True)
                 return "POTATO" # Fallback
                 
-            return resp.text.strip().upper()
+            text = resp.text.strip().upper()
+            return text
 
         except Exception as e:
             # If Gemini is unavailable, skip validation and trust the local model
@@ -399,22 +392,20 @@ async def predict(
     verdict, pred_vals = await asyncio.gather(verdict_task, local_task)
     
     # Only reject if Gemini explicitly identified it as non-potato (not on API errors)
-    if verdict != "POTATO" and not verdict.startswith("API_ERROR"):
-        friendly_message = f"This appears to be: {verdict.title()}. Please upload a clear photo of a Potato leaf."
+    is_potato = "POTATO" in verdict
+    gemini_disease = "UNKNOWN"
+    if "DISEASE:" in verdict:
+        gemini_disease = verdict.split("DISEASE:")[1].strip().split("|")[0].strip()
+
+    if not is_potato and "API_ERROR" not in verdict:
+        friendly_message = "This image does not appear to be a potato leaf. Please upload a clear photo of a Potato leaf."
         recoms = ["Ensure the photo is strictly of a single plant leaf.", "Ensure the plant is a potato crop."]
         
-        if "NOT A LEAF" in verdict:
-            friendly_message = "This image does not appear to be a leaf. Please upload a clear photo of a Potato leaf."
-            
         if lang == "hi":
-            friendly_message = f"यह {verdict.title()} प्रतीत होता है। कृपया आलू की पत्ती का स्पष्ट फोटो अपलोड करें।"
-            if "NOT A LEAF" in verdict:
-                friendly_message = "यह छवि पत्ती जैसी नहीं लग रही है। कृपया आलू की पत्ती का स्पष्ट फोटो अपलोड करें।"
+            friendly_message = "यह छवि आलू की पत्ती जैसी नहीं लग रही है। कृपया आलू की पत्ती का स्पष्ट फोटो अपलोड करें।"
             recoms = ["सुनिश्चित करें कि फोटो केवल एक पौधे की पत्ती का है।", "सुनिश्चित करें कि पौधा आलू की फसल है।"]
         elif lang == "mr":
-            friendly_message = f"हे {verdict.title()} असल्याचे वाटते. कृपया बटाट्याच्या पानाचा स्पष्ट फोटो अपलोड करा."
-            if "NOT A LEAF" in verdict:
-                friendly_message = "ही प्रतिमा पान वाटत नाही. कृपया बटाट्याच्या पानाचा स्पष्ट फोटो अपलोड करा."
+            friendly_message = "ही प्रतिमा बटाट्याचे पान वाटत नाही. कृपया बटाट्याच्या पानाचा स्पष्ट फोटो अपलोड करा."
             recoms = ["फोटो केवळ एका वनस्पतीच्या पानाचा असल्याची खात्री करा.", "वनस्पती बटाट्याचे पीक असल्याची खात्री करा."]
 
         return {
@@ -424,11 +415,17 @@ async def predict(
             "recommendations": recoms
         }
 
-
-    # Use the local model prediction
+    # 3. Use the local model prediction
     index = int(np.argmax(pred_vals))
     confidence = float(np.max(pred_vals)) * 100
     predicted_class = class_names[index]
+
+    # 4. Smart Override: If local model is unsure or says Early Blight but Gemini is sure it's Late Blight
+    # (Late blight is more dangerous, so we prioritize its detection if Gemini sees it)
+    if "LATE BLIGHT" in gemini_disease and confidence < 99.0:
+        print(f"OVERRIDE: Gemini detected Late Blight, local model was {confidence:.2f}% sure of {predicted_class}", flush=True)
+        predicted_class = "Potato___Late_blight"
+        confidence = 95.0 # High confidence for the override
     
     # DEBUG: Log raw softmax probabilities to diagnose model calibration
     print(f"\n--- PREDICTION DEBUG ---", flush=True)
