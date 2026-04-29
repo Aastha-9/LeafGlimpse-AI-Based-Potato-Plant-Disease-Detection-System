@@ -279,28 +279,26 @@ async def predict(
     # 3. Texture/Flatness check
     color_std = np.std(img_np)
     
-    # Heuristic for "Invalid Image"
-    # Real leaves are green (avg_exg > 0), but diseased ones can be brown (lower ExG).
-    # We only reject if it's extremely unlikely to be a leaf.
-    is_not_green = avg_exg < -30.0 and not is_colorless 
-    is_document = white_ratio > 0.60 or color_std < 15.0
-    
-    print(f"DEBUG: white_ratio={white_ratio:.4f}, avg_exg={avg_exg:.4f}, color_std={color_std:.4f}, is_colorless={is_colorless}", flush=True)
-    
-    if is_colorless or is_document or is_not_green:
-        msg = "The image appears to be a drawing, document, or non-leaf diagram."
-        if is_colorless:
-            msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
-        elif is_document:
-            msg = "The image appears to be a document or diagram with a white background, not a real plant leaf."
-        elif is_not_green:
-            msg = "The image colors do not match a typical plant leaf (even a diseased one). Please upload a clear photo of a leaf."
+    # Heuristic for "Invalid Image" - Keep it extremely minimal
+    # We only reject locally if it's almost perfectly grayscale (pencil sketch).
+    # Otherwise, we trust the parallel Gemini validation task.
+    if is_colorless:
+        msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
+        if lang == "hi":
+            msg = "यह छवि एक श्वेत-श्याम रेखाचित्र या स्केच प्रतीत होती है, न कि असली पौधे की पत्ती।"
+        elif lang == "mr":
+            msg = "ही प्रतिमा एक कृष्णधवल रेखाचित्र किंवा स्केच वाटते, खरी वनस्पतीची पाने नाही."
             
-        recoms = [
-            "Ensure the photo is a real photograph of a plant leaf.",
-            "Avoid uploading diagrams, flowcharts, or screenshots of text.",
-            "Ensure the plant is a potato crop."
-        ]
+        return {
+            "disease": "Invalid Image",
+            "confidence": 0.0,
+            "message": msg,
+            "recommendations": [
+                "Ensure the photo is a real photograph of a plant leaf.",
+                "Avoid uploading diagrams, flowcharts, or screenshots of text.",
+                "Ensure the plant is a potato crop."
+            ]
+        }
         
         if lang == "hi":
             if is_colorless:
