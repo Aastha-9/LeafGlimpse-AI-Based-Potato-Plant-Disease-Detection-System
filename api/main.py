@@ -285,15 +285,21 @@ async def predict(
     # 3. Texture/Flatness check
     color_std = np.std(img_np)
     
-    # Heuristic for "Invalid Image" - Keep it extremely minimal
-    # We only reject locally if it's almost perfectly grayscale (pencil sketch).
-    # Otherwise, we trust the parallel Gemini validation task.
-    if is_colorless:
-        msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
-        if lang == "hi":
-            msg = "यह छवि एक श्वेत-श्याम रेखाचित्र या स्केच प्रतीत होती है, न कि असली पौधे की पत्ती।"
-        elif lang == "mr":
-            msg = "ही प्रतिमा एक कृष्णधवल रेखाचित्र किंवा स्केच वाटते, खरी वनस्पतीची पाने नाही."
+    # Heuristic for "Invalid Image" - Restored but lenient
+    # Catch clearly non-leaf images (white documents or grey/skin tones)
+    # avg_exg: Real leaves are green (>0). People/Grey things are < -10.
+    # white_ratio: Documents are > 80% white.
+    is_not_green = avg_exg < -40.0 and not is_colorless 
+    is_document = white_ratio > 0.85 or color_std < 10.0
+    
+    if is_colorless or is_document or is_not_green:
+        msg = "The image does not appear to be a plant leaf."
+        if is_colorless:
+            msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
+        elif is_document:
+            msg = "The image appears to be a document or diagram, not a real plant leaf."
+        elif is_not_green:
+            msg = "The image colors do not match a typical plant leaf. Please upload a clear photo of a green leaf."
             
         return {
             "disease": "Invalid Image",
@@ -368,7 +374,7 @@ async def predict(
             # If the response was blocked, we'll get a finish_reason that isn't 1 (SUCCESS)
             if not resp.candidates or resp.candidates[0].finish_reason != 1:
                 print(f"Gemini response blocked or empty. Reason: {resp.candidates[0].finish_reason if resp.candidates else 'No candidates'}", flush=True)
-                return "POTATO" # Fallback
+                return "NOT A LEAF" # Better fallback than 'POTATO'
                 
             text = resp.text.strip().upper()
             return text
