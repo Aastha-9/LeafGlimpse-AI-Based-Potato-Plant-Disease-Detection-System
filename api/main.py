@@ -1,203 +1,378 @@
-from fastapi import FastAPI, UploadFile, File, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import tensorflow as tf
-import numpy as np
-from PIL import Image
+import asyncio
 import io
 import os
+import random
 
-from translations import translations
-from recommendations import recommendations
 import google.generativeai as genai
+import numpy as np
+import tensorflow as tf
 from dotenv import load_dotenv
+from fastapi import FastAPI, File, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+from pydantic import BaseModel
 
-# Load environment variables forcibly so hot-reloads detect changes
+from recommendations import recommendations
+from translations import translations
+
+# ---------------------------------------------------------------------------
+# Environment & API key
+# ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(BASE_DIR, '.env')
-load_dotenv(dotenv_path=env_path, override=True)
+load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"), override=True)
 
-# Configuration
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     print("WARNING: GEMINI_API_KEY is missing!", flush=True)
 
 genai.configure(api_key=api_key)
 
-# Global model cache to avoid repeated API calls
-MODEL_CACHE = {"chat": None, "vision": None}
+# ---------------------------------------------------------------------------
+# Gemini model cache  (avoids repeated discovery on every request)
+# ---------------------------------------------------------------------------
+_MODEL_CACHE: dict = {"chat": None, "vision": None}
 
-def get_model(mode="chat"):
+_DEFAULTS = {
+    "chat":   ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash",
+               "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"],
+    "vision": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash",
+               "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro-vision"],
+}
+
+
+def get_model(mode: str = "chat"):
     """
-    Dynamically finds a working model for the given mode.
-    Mode: 'chat' (text-only) or 'vision' (multimodal)
+    Dynamically finds and caches a working Gemini model.
+    mode: 'chat' (text-only) or 'vision' (multimodal)
     """
-    if MODEL_CACHE[mode]:
-        return MODEL_CACHE[mode]
+    if _MODEL_CACHE[mode]:
+        return _MODEL_CACHE[mode]
 
-    # Priority defaults - Use 2.5/2.0/3.5/1.5 Flash for best stability and free-tier quotas
-    defaults = {
-        "chat": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"],
-        "vision": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro-vision"] 
-    }
-
-    # 1. Try defaults first
-    for model_name in defaults[mode]:
+    # 1. Try priority defaults first
+    for model_name in _DEFAULTS[mode]:
         try:
             m = genai.GenerativeModel(model_name)
-            # Test model with a minimal prompt to verify it's supported and functional
             if mode == "vision":
-                dummy_img = Image.new('RGB', (10, 10))
-                m.generate_content(["test", dummy_img], generation_config={"max_output_tokens": 1})
+                dummy_img = Image.new("RGB", (10, 10))
+                m.generate_content(
+                    ["test", dummy_img],
+                    generation_config={"max_output_tokens": 1},
+                )
             else:
                 m.generate_content("test", generation_config={"max_output_tokens": 1})
-            
-            MODEL_CACHE[mode] = m
-            print(f"Successfully loaded and verified '{model_name}' for {mode} mode.", flush=True)
+            _MODEL_CACHE[mode] = m
+            print(f"Loaded '{model_name}' for {mode} mode.", flush=True)
             return m
         except Exception as e:
-            print(f"Failed to load/verify default model '{model_name}': {e}", flush=True)
-            continue
+            print(f"Model '{model_name}' unavailable: {e}", flush=True)
 
-    # 2. If defaults fail, list all available models and find a compatible one
+    # 2. Fallback: discover all available models dynamically
     try:
-        print(f"Default models failed for {mode}. Listing available models...", flush=True)
-        available = genai.list_models()
-        for m_info in available:
-            if 'generateContent' in m_info.supported_generation_methods:
-                # Basic logic: vision models usually have 'vision' or 'flash' or '1.5' or '2.0' or '2.5' or '3.5' in name
-                is_vision_capable = any(keyword in m_info.name.lower() for keyword in ['vision', 'flash', '1.5', '2.0', '2.5', '3.5'])
-                
-                if (mode == "vision" and is_vision_capable) or (mode == "chat"):
-                    try:
-                        m = genai.GenerativeModel(m_info.name)
-                        m.generate_content("test", generation_config={"max_output_tokens": 1})
-                        MODEL_CACHE[mode] = m
-                        print(f"Dynamically discovered, loaded and verified '{m_info.name}' for {mode} mode.", flush=True)
-                        return m
-                    except Exception:
-                        continue
+        print(f"Defaults failed for {mode}. Scanning available models…", flush=True)
+        for m_info in genai.list_models():
+            if "generateContent" not in m_info.supported_generation_methods:
+                continue
+            is_vision = any(
+                kw in m_info.name.lower()
+                for kw in ["vision", "flash", "1.5", "2.0", "2.5"]
+            )
+            if mode == "vision" and not is_vision:
+                continue
+            try:
+                m = genai.GenerativeModel(m_info.name)
+                m.generate_content("test", generation_config={"max_output_tokens": 1})
+                _MODEL_CACHE[mode] = m
+                print(f"Discovered '{m_info.name}' for {mode} mode.", flush=True)
+                return m
+            except Exception:
+                continue
     except Exception as e:
         print(f"Critical error during model discovery: {e}", flush=True)
 
-    # Final fallback to first default even if it might fail (will show error in API)
-    return genai.GenerativeModel(defaults[mode][0])
+    # 3. Last resort — return first default (may fail at call-time)
+    return genai.GenerativeModel(_DEFAULTS[mode][0])
 
-app = FastAPI()
 
-# ========================
-# CORS
-# ========================
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(title="LeafGlimpse API", version="1.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001"
+        "http://127.0.0.1:3001",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ========================
-# Class names (same order as training)
-# ========================
-class_names = [
+# ---------------------------------------------------------------------------
+# TensorFlow model  (class names must match training order)
+# ---------------------------------------------------------------------------
+CLASS_NAMES = [
     "Potato___Late_blight",
     "Potato___Early_blight",
-    "Potato___healthy"
+    "Potato___healthy",
 ]
 
-# ========================
-# Load latest SavedModel
-# ========================
-MODEL_DIR = "../models"
-latest_version = max([int(i) for i in os.listdir(MODEL_DIR) if i.isdigit()])
-
-model = tf.keras.layers.TFSMLayer(
-    f"{MODEL_DIR}/{latest_version}",
-    call_endpoint="serve"
+MODEL_DIR = os.path.join(BASE_DIR, "..", "models")
+_latest_version = max(int(v) for v in os.listdir(MODEL_DIR) if v.isdigit())
+tf_model = tf.keras.layers.TFSMLayer(
+    os.path.join(MODEL_DIR, str(_latest_version)),
+    call_endpoint="serve",
 )
 
-# ========================
-# Routes
-# ========================
-from pydantic import BaseModel
+# ---------------------------------------------------------------------------
+# Helper: safety settings for Gemini (lenient for agricultural content)
+# ---------------------------------------------------------------------------
+_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
 
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 class ChatRequest(BaseModel):
     message: str
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest, lang: str = Query("en")):
+    """Agricultural chatbot powered by Gemini."""
     lang_map = {"en": "English", "hi": "Hindi", "mr": "Marathi"}
     target_lang = lang_map.get(lang, "English")
     try:
-        # Get a working model dynamically
-        model = get_model("chat")
-        chat = model.start_chat(history=[])
-        query = f"You are a highly knowledgeable agricultural AI assistant. You MUST reply ONLY in the {target_lang} language! Answer the user's question clearly and concisely: {request.message}"
+        gemini = get_model("chat")
+        chat = gemini.start_chat(history=[])
+        query = (
+            f"You are a highly knowledgeable agricultural AI assistant. "
+            f"You MUST reply ONLY in the {target_lang} language! "
+            f"Answer the user's question clearly and concisely: {request.message}"
+        )
         response = chat.send_message(query)
         return {"reply": response.text}
     except Exception as e:
         error_msg = str(e)
         print(f"Chatbot Error: {error_msg}", flush=True)
-        
-        # Handle Quota Exceeded (429) specifically
         if "429" in error_msg or "quota" in error_msg.lower():
-            friendly_msgs = {
-                "en": "I've answered so many questions today that I need a quick rest! Please try again in a few minutes.",
-                "hi": "मैंने आज इतने सारे सवालों के जवाब दिए हैं कि मुझे थोड़ी देर आराम की ज़रूरत है! कृपया कुछ मिनटों बाद फिर से प्रयास करें।",
-                "mr": "मी आज इतक्या प्रश्नांची उत्तरे दिली आहेत की मला थोड्या विश्रांतीची गरज आहे! कृपया काही मिनिटांनंतर पुन्हा प्रयत्न करा."
+            quota_msgs = {
+                "en": (
+                    "I've answered so many questions today that I need a quick rest! "
+                    "Please try again in a few minutes."
+                ),
+                "hi": (
+                    "मैंने आज इतने सारे सवालों के जवाब दिए हैं कि मुझे थोड़ी देर "
+                    "आराम की ज़रूरत है! कृपया कुछ मिनटों बाद फिर से प्रयास करें।"
+                ),
+                "mr": (
+                    "मी आज इतक्या प्रश्नांची उत्तरे दिली आहेत की मला थोड्या "
+                    "विश्रांतीची गरज आहे! कृपया काही मिनिटांनंतर पुन्हा प्रयत्न करा."
+                ),
             }
-            return {"reply": friendly_msgs.get(lang, friendly_msgs["en"])}
-            
-        return {"reply": "I'm sorry, I'm having trouble connecting to my agricultural brain right now. Please try again later."}
+            return {"reply": quota_msgs.get(lang, quota_msgs["en"])}
+        return {
+            "reply": (
+                "I'm sorry, I'm having trouble connecting to my agricultural brain "
+                "right now. Please try again later."
+            )
+        }
+
 
 @app.get("/blogs")
 def get_blogs(lang: str = Query("en")):
-    import random
-    # Multilingual structured mock blogs
+    """Returns 6 random agricultural blog posts in the requested language."""
     db = {
         "en": [
-            {"id": 1, "title": "Understanding Late Blight", "category": "Disease", "excerpt": "Late blight is a devastating potato disease. Learn how to identify its early signs.", "content": "Late blight is caused by the oomycete Phytophthora infestans. It thrives in cool, humid weather and can destroy an entire potato crop within days. Early symptoms include water-soaked spots on leaves that turn brown or black, often with a white fungal growth on the underside. Preventive measures include planting certified disease-free seed potatoes, ensuring good spacing, and applying protective fungicides."},
-            {"id": 2, "title": "Top 5 Fungicides", "category": "Remedies", "excerpt": "A deep dive into Mancozeb and Metalaxyl for agricultural use.", "content": "When fighting potato blight, timely application of fungicides is crucial. Mancozeb is an excellent protectant fungicide that forms a protective barrier on the leaf. Metalaxyl offers systemic protection, meaning it gets absorbed into the plant tissue. For best results, rotate between different classes of fungicides to prevent the disease from building resistance."},
-            {"id": 3, "title": "Optimizing Crop Yield", "category": "Crops", "excerpt": "How proper drainage and soil management can double your potato harvest.", "content": "Potatoes require well-drained, loose soil to grow unobstructed. Soil compaction can severely restrict tuber expansion and lead to deformed potatoes. Raised beds or hilling up soil around the base of the plant can improve drainage and protect shallow tubers from sun exposure, which turns them green and toxic. Regular crop rotation is also vital."},
-            {"id": 4, "title": "Identifying Early Blight", "category": "Disease", "excerpt": "Spotting early blight before it ruins your foliage.", "content": "Early blight, caused by Alternaria solani, primarily affects older leaves first. You'll notice small, dark, circular spots that often have concentric rings, like a target. Warm, humid weather accelerates its spread. To prevent early blight, ensure adequate fertilization (especially nitrogen) and avoid overhead irrigation which keeps leaves wet unnecessarily."},
-            {"id": 5, "title": "Organic Potato Farming", "category": "Crops", "excerpt": "Grow healthy crops without synthetic chemicals.", "content": "Organic potato farming relies on building healthy soil biology using compost, cover crops, and organic amendments. Pest management is done through natural predators, crop rotation, and botanical sprays like neem oil. While it requires more intensive labor and planning, organic potatoes often command a premium price in local markets."},
-            {"id": 6, "title": "Watering Strategies", "category": "Remedies", "excerpt": "When, how, and exactly how much to water your potato plants.", "content": "Potatoes need consistent moisture, especially during tuber formation. Inconsistent watering leads to cracking and malformed potatoes. The general rule is 1 to 2 inches of water per week. Drip irrigation is highly recommended over sprinklers because it delivers water directly to the root zone and keeps the leaves dry, dramatically lowering the risk of fungal diseases like blight."},
+            {
+                "id": 1, "title": "Understanding Late Blight", "category": "Disease",
+                "excerpt": "Late blight is a devastating potato disease. Learn how to identify its early signs.",
+                "content": (
+                    "Late blight is caused by the oomycete Phytophthora infestans. It thrives in cool, "
+                    "humid weather and can destroy an entire potato crop within days. Early symptoms include "
+                    "water-soaked spots on leaves that turn brown or black, often with a white fungal growth "
+                    "on the underside. Preventive measures include planting certified disease-free seed "
+                    "potatoes, ensuring good spacing, and applying protective fungicides."
+                ),
+            },
+            {
+                "id": 2, "title": "Top 5 Fungicides", "category": "Remedies",
+                "excerpt": "A deep dive into Mancozeb and Metalaxyl for agricultural use.",
+                "content": (
+                    "When fighting potato blight, timely application of fungicides is crucial. Mancozeb is "
+                    "an excellent protectant fungicide that forms a protective barrier on the leaf. Metalaxyl "
+                    "offers systemic protection, meaning it gets absorbed into the plant tissue. For best "
+                    "results, rotate between different classes of fungicides to prevent resistance build-up."
+                ),
+            },
+            {
+                "id": 3, "title": "Optimizing Crop Yield", "category": "Crops",
+                "excerpt": "How proper drainage and soil management can double your potato harvest.",
+                "content": (
+                    "Potatoes require well-drained, loose soil to grow unobstructed. Soil compaction can "
+                    "severely restrict tuber expansion. Raised beds or hilling up soil around the plant base "
+                    "improves drainage and protects tubers from sun exposure. Regular crop rotation is vital."
+                ),
+            },
+            {
+                "id": 4, "title": "Identifying Early Blight", "category": "Disease",
+                "excerpt": "Spotting early blight before it ruins your foliage.",
+                "content": (
+                    "Early blight, caused by Alternaria solani, primarily affects older leaves first. You'll "
+                    "notice small, dark, circular spots with concentric rings, like a target. Warm, humid "
+                    "weather accelerates its spread. Ensure adequate fertilization (especially nitrogen) and "
+                    "avoid overhead irrigation."
+                ),
+            },
+            {
+                "id": 5, "title": "Organic Potato Farming", "category": "Crops",
+                "excerpt": "Grow healthy crops without synthetic chemicals.",
+                "content": (
+                    "Organic potato farming relies on building healthy soil biology using compost, cover "
+                    "crops, and organic amendments. Pest management uses natural predators, crop rotation, "
+                    "and botanical sprays like neem oil. Organic potatoes often command a premium price."
+                ),
+            },
+            {
+                "id": 6, "title": "Watering Strategies", "category": "Remedies",
+                "excerpt": "When, how, and exactly how much to water your potato plants.",
+                "content": (
+                    "Potatoes need consistent moisture, especially during tuber formation — about 1–2 inches "
+                    "per week. Drip irrigation is recommended over sprinklers because it keeps leaves dry, "
+                    "dramatically lowering the risk of fungal diseases like blight."
+                ),
+            },
         ],
         "hi": [
-            {"id": 1, "title": "लेट ब्लाइट को समझना", "category": "रोग", "excerpt": "लेट ब्लाइट एक विनाशकारी आलू की बीमारी है। इसके शुरुआती लक्षणों को पहचानना सीखें।", "content": "लेट ब्लाइट फाइटोफ्थोरा इन्फेस्टैन्स के कारण होता है। यह ठंडे और नम मौसम में फलता-फूलता है। शुरुआती लक्षणों में पत्तियों पर पानी से भीगे धब्बे शामिल हैं जो भूरे या काले हो जाते हैं। निवारक उपायों में प्रमाणित रोग-मुक्त बीज आलू लगाना और सुरक्षात्मक कवकनाशी लागू करना शामिल है।"},
-            {"id": 2, "title": "शीर्ष 5 फफूंदनाशक", "category": "उपाय", "excerpt": "कृषि उपयोग के लिए मैंकोजेब और मेटलैक्सिल पर एक गहरा अध्ययन।", "content": "आलू के ब्लाइट से लड़ते समय, कवकनाशी का समय पर उपयोग महत्वपूर्ण है। मैंकोजेब एक बेहतरीन रक्षक कवकनाशी है जो पत्ती पर एक सुरक्षात्मक परत बनाता है। मेटलैक्सिल प्रणालीगत सुरक्षा प्रदान करता है। सर्वोत्तम परिणामों के लिए, विभिन्न कवकनाशी का उपयोग बदल-बदल कर करें।"},
-            {"id": 3, "title": "फसल की उपज को अनुकूलित करना", "category": "फसलें", "excerpt": "उचित जल निकासी और मिट्टी प्रबंधन आपके आलू की फसल को कैसे दोगुना कर सकता है।", "content": "आलू को बिना रुकावट बढ़ने के लिए अच्छी जल निकासी वाली हल्की मिट्टी की आवश्यकता होती है। मिट्टी का सख्त होना कंदों के विकास को रोक सकता है। पौधों के आधार पर मिट्टी चढ़ाने से जल निकासी में सुधार होता है और कंदों को सूरज की रोशनी से बचाया जा सकता है।"},
-            {"id": 4, "title": "अर्ली ब्लाइट की पहचान", "category": "रोग", "excerpt": "पत्ते खराब होने से पहले अर्ली ब्लाइट का पता लगाएं।", "content": "ऑल्टरनेरिया सोलानी के कारण होने वाला अर्ली ब्लाइट मुख्य रूप से पुरानी पत्तियों को प्रभावित करता है। आपको छोटे, गहरे रंग के गोल धब्बे दिखाई देंगे जिनमें अक्सर लक्ष्य की तरह गाढ़ा छल्ला होता है। गर्म और नम मौसम इसके प्रसार को तेज करता है।"},
-            {"id": 5, "title": "जैविक आलू की खेती", "category": "फसलें", "excerpt": "बिना रसायनों के स्वस्थ फसलें उगाएं।", "content": "जैविक आलू की खेती खाद और फसल चक्रण का उपयोग करके स्वस्थ मिट्टी बनाने पर निर्भर करती है। नीम के तेल जैसे प्राकृतिक स्प्रे का उपयोग कीट प्रबंधन के लिए किया जाता है। हालांकि इसमें अधिक श्रम लगता है, जैविक आलू अक्सर बाजार में ज्यादा कीमत देते हैं।"},
-            {"id": 6, "title": "सिंचाई की रणनीतियाँ", "category": "उपाय", "excerpt": "आलू के पौधों को कब और कितना पानी देना है।", "content": "आलू को लगातार नमी की आवश्यकता होती है, खासकर कंद बनने के दौरान। ड्रिप सिंचाई की अत्यधिक अनुशंसा की जाती है क्योंकि यह पानी को सीधे जड़ों तक पहुंचाता है और पत्तियों को सूखा रखता है, जिससे फंगल रोगों का जोखिम कम हो जाता है।"},
+            {
+                "id": 1, "title": "लेट ब्लाइट को समझना", "category": "रोग",
+                "excerpt": "लेट ब्लाइट एक विनाशकारी आलू की बीमारी है। इसके शुरुआती लक्षणों को पहचानना सीखें।",
+                "content": (
+                    "लेट ब्लाइट फाइटोफ्थोरा इन्फेस्टैन्स के कारण होता है। यह ठंडे और नम मौसम में "
+                    "फलता-फूलता है। निवारक उपायों में प्रमाणित रोग-मुक्त बीज आलू लगाना और सुरक्षात्मक "
+                    "कवकनाशी लागू करना शामिल है।"
+                ),
+            },
+            {
+                "id": 2, "title": "शीर्ष 5 फफूंदनाशक", "category": "उपाय",
+                "excerpt": "कृषि उपयोग के लिए मैंकोजेब और मेटलैक्सिल पर एक गहरा अध्ययन।",
+                "content": (
+                    "आलू के ब्लाइट से लड़ते समय, कवकनाशी का समय पर उपयोग महत्वपूर्ण है। मैंकोजेब पत्ती पर "
+                    "एक सुरक्षात्मक परत बनाता है। मेटलैक्सिल प्रणालीगत सुरक्षा प्रदान करता है।"
+                ),
+            },
+            {
+                "id": 3, "title": "फसल की उपज को अनुकूलित करना", "category": "फसलें",
+                "excerpt": "उचित जल निकासी और मिट्टी प्रबंधन आपके आलू की फसल को कैसे दोगुना कर सकता है।",
+                "content": (
+                    "आलू को बिना रुकावट बढ़ने के लिए अच्छी जल निकासी वाली हल्की मिट्टी की आवश्यकता होती है। "
+                    "मिट्टी का सख्त होना कंदों के विकास को रोक सकता है।"
+                ),
+            },
+            {
+                "id": 4, "title": "अर्ली ब्लाइट की पहचान", "category": "रोग",
+                "excerpt": "पत्ते खराब होने से पहले अर्ली ब्लाइट का पता लगाएं।",
+                "content": (
+                    "ऑल्टरनेरिया सोलानी के कारण होने वाला अर्ली ब्लाइट मुख्य रूप से पुरानी पत्तियों को "
+                    "प्रभावित करता है। गर्म और नम मौसम इसके प्रसार को तेज करता है।"
+                ),
+            },
+            {
+                "id": 5, "title": "जैविक आलू की खेती", "category": "फसलें",
+                "excerpt": "बिना रसायनों के स्वस्थ फसलें उगाएं।",
+                "content": (
+                    "जैविक आलू की खेती खाद और फसल चक्रण का उपयोग करके स्वस्थ मिट्टी बनाने पर निर्भर करती है। "
+                    "जैविक आलू अक्सर बाजार में ज्यादा कीमत देते हैं।"
+                ),
+            },
+            {
+                "id": 6, "title": "सिंचाई की रणनीतियाँ", "category": "उपाय",
+                "excerpt": "आलू के पौधों को कब और कितना पानी देना है।",
+                "content": (
+                    "आलू को लगातार नमी की आवश्यकता होती है। ड्रिप सिंचाई की अत्यधिक अनुशंसा की जाती है "
+                    "क्योंकि यह पत्तियों को सूखा रखता है, जिससे फंगल रोगों का जोखिम कम हो जाता है।"
+                ),
+            },
         ],
         "mr": [
-            {"id": 1, "title": "लेट ब्लाइट समजून घेणे", "category": "रोग", "excerpt": "लेट ब्लाइट हा बटाट्यावरील एक भयंकर रोग आहे. त्याची सुरुवातीची लक्षणे कशी ओळखावीत ते शिका.", "content": "लेट ब्लाइट फायटोप्थोरा इन्फेस्टन्समुळे होतो. हा रोग थंड आणि दमट हवामानात वेगाने पसरतो. सुरुवातीच्या लक्षणांमध्ये पानांवर पाण्यासारखे डाग दिसतात जे नंतर काळे पडतात. प्रतिबंधात्मक उपायांमध्ये प्रमाणित रोगमुक्त बियाणे वापरणे आणि बुरशीनाशकांची फवारणी करणे समाविष्ट आहे."},
-            {"id": 2, "title": "नवीन 5 बुरशीनाशके", "category": "उपाय", "excerpt": "शेतीसाठी मॅनकोझेब आणि मेटलॅक्सिलचा सखोल अभ्यास.", "content": "बटाट्यावरील रोगांशी लढताना, बुरशीनाशकांचा वेळेवर वापर अत्यंत महत्त्वाचा आहे. मॅनकोझेब हे पानांवर एक संरक्षक आवरण तयार करते, तर मेटलॅक्सिल प्रणालीगत संरक्षण देते. चांगल्या परिणामांसाठी विविध प्रकारच्या बुरशीनाशकांचा आलटून पालटून वापर करा."},
-            {"id": 3, "title": "पिकांचे उत्पन्न वाढवणे", "category": "पिके", "excerpt": "पाण्याचा योग्य निचरा आणि माती व्यवस्थापन तुमचे बटाट्याचे पीक कसे दुप्पट करू शकते.", "content": "बटाट्याच्या चांगल्या वाढीसाठी पाण्याचा उत्तम निचरा होणारी भुसभुशीत माती आवश्यक असते. माती घट्ट असल्यास कंदांची वाढ खुंटते. बटाट्याच्या रोपाच्या बुंध्याजवळ मातीची भर दिल्यास पाण्याचा निचरा चांगला होतो आणि कंदांचे सूर्यप्रकाशापासून संरक्षण होते."},
-            {"id": 4, "title": "अर्ली ब्लाइटची ओळख", "category": "रोग", "excerpt": "पाने खराब होण्यापूर्वी अर्ली ब्लाइट कसा ओळखावा.", "content": "अल्टरनेरिया सोलानीमुळे होणारा अर्ली ब्लाइट प्रामुख्याने जुन्या पानांवर परिणाम करतो. तुम्हाला पानांवर लहान, गडद, गोलाकार डाग दिसतील. उष्ण आणि दमट हवामानात या रोगाचा प्रसार वेगाने होतो. अर्ली ब्लाइट टाळण्यासाठी पिकांना योग्य खते द्या."},
-            {"id": 5, "title": "सेंद्रिय बटाटा शेती", "category": "पिके", "excerpt": "कोणत्याही रसायनांशिवाय निरोगी पिके घ्या.", "content": "सेंद्रिय बटाटा शेती नैसर्गिक खत आणि योग्य पीक व्यवस्थापनावर अवलंबून असते. कीड व्यवस्थापनासाठी कडुनिंबाच्या तेलासारख्या नैसर्गिक फवारण्यांचा वापर करा. यात जास्त मेहनत लागत असली तरी सेंद्रिय बटाट्यांना बाजारात जास्त भाव मिळतो."},
-            {"id": 6, "title": "सिंचन पद्धती", "category": "उपाय", "excerpt": "बटाट्याच्या झाडांना पाणी किती आणि कसे द्यावे.", "content": "बटाट्यांना वाढीच्या काळात सतत ओलावा लागतो. ठिबक सिंचनाची शिफारस केली जाते कारण यामुळे बुरशीजन्य रोगांचा धोका कमी होतो. तुषार सिंचनामुळे पाने ओली राहून रोगांचा प्रादुर्भाव होऊ शकतो."},
-        ]
+            {
+                "id": 1, "title": "लेट ब्लाइट समजून घेणे", "category": "रोग",
+                "excerpt": "लेट ब्लाइट हा बटाट्यावरील एक भयंकर रोग आहे. त्याची सुरुवातीची लक्षणे कशी ओळखावीत ते शिका.",
+                "content": (
+                    "लेट ब्लाइट फायटोप्थोरा इन्फेस्टन्समुळे होतो. प्रतिबंधात्मक उपायांमध्ये प्रमाणित "
+                    "रोगमुक्त बियाणे वापरणे आणि बुरशीनाशकांची फवारणी करणे समाविष्ट आहे."
+                ),
+            },
+            {
+                "id": 2, "title": "नवीन 5 बुरशीनाशके", "category": "उपाय",
+                "excerpt": "शेतीसाठी मॅनकोझेब आणि मेटलॅक्सिलचा सखोल अभ्यास.",
+                "content": (
+                    "मॅनकोझेब हे पानांवर एक संरक्षक आवरण तयार करते, तर मेटलॅक्सिल प्रणालीगत संरक्षण देते. "
+                    "चांगल्या परिणामांसाठी विविध बुरशीनाशकांचा आलटून पालटून वापर करा."
+                ),
+            },
+            {
+                "id": 3, "title": "पिकांचे उत्पन्न वाढवणे", "category": "पिके",
+                "excerpt": "पाण्याचा योग्य निचरा आणि माती व्यवस्थापन तुमचे बटाट्याचे पीक कसे दुप्पट करू शकते.",
+                "content": (
+                    "बटाट्याच्या चांगल्या वाढीसाठी पाण्याचा उत्तम निचरा होणारी भुसभुशीत माती आवश्यक असते. "
+                    "माती घट्ट असल्यास कंदांची वाढ खुंटते."
+                ),
+            },
+            {
+                "id": 4, "title": "अर्ली ब्लाइटची ओळख", "category": "रोग",
+                "excerpt": "पाने खराब होण्यापूर्वी अर्ली ब्लाइट कसा ओळखावा.",
+                "content": (
+                    "अल्टरनेरिया सोलानीमुळे होणारा अर्ली ब्लाइट प्रामुख्याने जुन्या पानांवर परिणाम करतो. "
+                    "उष्ण आणि दमट हवामानात या रोगाचा प्रसार वेगाने होतो."
+                ),
+            },
+            {
+                "id": 5, "title": "सेंद्रिय बटाटा शेती", "category": "पिके",
+                "excerpt": "कोणत्याही रसायनांशिवाय निरोगी पिके घ्या.",
+                "content": (
+                    "सेंद्रिय बटाटा शेती नैसर्गिक खत आणि योग्य पीक व्यवस्थापनावर अवलंबून असते. "
+                    "सेंद्रिय बटाट्यांना बाजारात जास्त भाव मिळतो."
+                ),
+            },
+            {
+                "id": 6, "title": "सिंचन पद्धती", "category": "उपाय",
+                "excerpt": "बटाट्याच्या झाडांना पाणी किती आणि कसे द्यावे.",
+                "content": (
+                    "बटाट्यांना वाढीच्या काळात सतत ओलावा लागतो. ठिबक सिंचनाची शिफारस केली जाते कारण "
+                    "यामुळे बुरशीजन्य रोगांचा धोका कमी होतो."
+                ),
+            },
+        ],
     }
-    
     active_blogs = db.get(lang, db["en"])
     return random.sample(active_blogs, min(6, len(active_blogs)))
 
-# ========================
-# Serve React Frontend
-# ========================
+
+# ---------------------------------------------------------------------------
+# Serve React frontend (production build)
+# ---------------------------------------------------------------------------
 BUILD_DIR = os.path.join(BASE_DIR, "..", "frontend", "build")
 
 if os.path.exists(BUILD_DIR):
-    # Serve the static JS/CSS/media assets
-    app.mount("/static", StaticFiles(directory=os.path.join(BUILD_DIR, "static")), name="static")
+    app.mount(
+        "/static",
+        StaticFiles(directory=os.path.join(BUILD_DIR, "static")),
+        name="static",
+    )
 
     @app.get("/")
     def serve_react_root():
@@ -205,99 +380,98 @@ if os.path.exists(BUILD_DIR):
 
     @app.get("/{full_path:path}")
     def serve_react_spa(full_path: str):
-        """Catch-all: send all non-API requests to the React index.html."""
+        """Catch-all: route all non-API paths to the React SPA."""
         file_path = os.path.join(BUILD_DIR, full_path)
         if os.path.isfile(file_path):
             return FileResponse(file_path)
         return FileResponse(os.path.join(BUILD_DIR, "index.html"))
+
 else:
     @app.get("/")
     def home():
-        return {"message": "Potato Disease API is running! Build the React frontend to serve the UI."}
+        return {"message": "LeafGlimpse API is running. Build the React frontend to serve the UI."}
 
+
+# ---------------------------------------------------------------------------
+# Debug endpoint
+# ---------------------------------------------------------------------------
 @app.get("/debug")
 def debug():
     img_array = np.ones((1, 256, 256, 3))
-    predictions = model(img_array)
+    predictions = tf_model(img_array)
     return {
         "predictions_type": str(type(predictions)),
-        "predictions_repr": str(predictions)
+        "predictions_repr": str(predictions),
     }
 
+
+# ---------------------------------------------------------------------------
+# Predict endpoint
+# ---------------------------------------------------------------------------
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
-    lang: str = Query("en")   # en | hi | mr
+    lang: str = Query("en"),   # en | hi | mr
 ):
-    print(f"DEBUG: predict called with lang='{lang}'", flush=True)
-    import asyncio
-    
+    """
+    Classifies an uploaded potato leaf image.
+    Runs Gemini vision validation and local TF model in parallel.
+    """
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    
-    # Resize for Gemini to speed up upload
+
+    # Resize for Gemini (smaller = faster upload)
     gemini_image = image.resize((256, 256))
-    
-    # Prepare local model array (no manual /255 — model handles rescaling internally)
-    img_array = np.array(image.resize((256, 256)), dtype=np.float32)
-    img_array = np.expand_dims(img_array, axis=0)
 
-    # ---- TEST-TIME AUGMENTATION (TTA) ----
-    # Run through 5 augmented versions and average to improve real-world accuracy
-    def augment(arr):
-        """Returns a list of augmented numpy arrays from a single (1,H,W,3) array."""
-        variants = [arr]
-        # horizontal flip
-        variants.append(arr[:, :, ::-1, :])
-        # vertical flip
-        variants.append(arr[:, ::-1, :, :])
-        # slight brightness boost (+10%)
-        variants.append(np.clip(arr * 1.1, 0, 255))
-        # slight brightness dim (-10%)
-        variants.append(np.clip(arr * 0.9, 0, 255))
-        return variants
-    
-    tta_variants = augment(img_array)
+    # Prepare array for local TF model
+    img_array = np.expand_dims(
+        np.array(image.resize((256, 256)), dtype=np.float32), axis=0
+    )
 
-    # ---- LOCAL PRE-FILTER: reject obvious non-leaf images ----
+    # ------------------------------------------------------------------
+    # Test-Time Augmentation (TTA) — average 5 variants for robustness
+    # ------------------------------------------------------------------
+    def _augment(arr: np.ndarray) -> list:
+        return [
+            arr,
+            arr[:, :, ::-1, :],                  # horizontal flip
+            arr[:, ::-1, :, :],                  # vertical flip
+            np.clip(arr * 1.1, 0, 255),          # brightness +10 %
+            np.clip(arr * 0.9, 0, 255),          # brightness -10 %
+        ]
+
+    tta_variants = _augment(img_array)
+
+    # ------------------------------------------------------------------
+    # Local pre-filter: reject obvious non-leaf images immediately
+    # ------------------------------------------------------------------
     img_np = np.array(image.resize((128, 128)), dtype=np.float32)
-    
-    R = img_np[:, :, 0]
-    G = img_np[:, :, 1]
-    B = img_np[:, :, 2]
-    
-    # Check: Is there ANY meaningful color variation?
-    # Only rejects truly monochrome images (pure drawings/sketches)
-    max_channel = np.maximum(np.maximum(R, G), B)
-    min_channel = np.minimum(np.minimum(R, G), B)
-    saturation_map = max_channel - min_channel
-    avg_saturation = np.mean(saturation_map)
-    
-    # Very lenient: only reject if almost completely grayscale (saturation < 8)
-    is_colorless = avg_saturation < 8.0
-    
-    # 1. White/Light Background detection (common in documents)
-    white_mask = np.all(img_np > 200, axis=2)
-    white_ratio = np.mean(white_mask)
-    
-    # 2. Color Profile check (Potato leaves are primarily green)
-    # Excess Green Index (ExG) = 2*G - R - B
-    r, g, b = img_np[:,:,0].astype(float), img_np[:,:,1].astype(float), img_np[:,:,2].astype(float)
-    exg = 2.0 * g - r - b
-    avg_exg = np.mean(exg)
-    
-    # 3. Texture/Flatness check
-    color_std = np.std(img_np)
-    
-    # avg_exg: Real leaves are green (typically > 0).
-    # People/buildings/sky score around -5 to -30.
-    # -10.0 is the strict threshold used when Gemini is available.
-    # A tighter threshold (-2.0) is used as a safety net when Gemini is offline.
+    r_ch = img_np[:, :, 0].astype(float)
+    g_ch = img_np[:, :, 1].astype(float)
+    b_ch = img_np[:, :, 2].astype(float)
+
+    # Colour saturation (HSV-style)
+    max_c = np.maximum(np.maximum(r_ch, g_ch), b_ch)
+    min_c = np.minimum(np.minimum(r_ch, g_ch), b_ch)
+    avg_saturation = float(np.mean(max_c - min_c))
+
+    # Excess Green Index — real leaves score ≥ 0, non-plants score negative
+    avg_exg = float(np.mean(2.0 * g_ch - r_ch - b_ch))
+
+    # White/document background
+    white_ratio = float(np.mean(np.all(img_np > 200, axis=2)))
+    color_std = float(np.std(img_np))
+
+    is_colorless        = avg_saturation < 8.0
+    is_document         = white_ratio > 0.85 or color_std < 10.0
     is_not_green_strict = avg_exg < -10.0 and not is_colorless
-    is_document = white_ratio > 0.85 or color_std < 10.0
-    
-    print(f"DEBUG pre-filter: avg_exg={avg_exg:.2f}, avg_saturation={avg_saturation:.2f}, white_ratio={white_ratio:.2f}, color_std={color_std:.2f}", flush=True)
-    
+
+    print(
+        f"PRE-FILTER | exg={avg_exg:.1f} sat={avg_saturation:.1f} "
+        f"white={white_ratio:.2f} std={color_std:.1f}",
+        flush=True,
+    )
+
     if is_colorless or is_document or is_not_green_strict:
         if lang == "hi":
             if is_colorless:
@@ -309,7 +483,7 @@ async def predict(
             recoms = [
                 "सुनिश्चित करें कि फोटो पौधे की पत्ती का वास्तविक छायाचित्र है।",
                 "आरेख, फ्लोचार्ट या टेक्स्ट के स्क्रीनशॉट अपलोड करने से बचें।",
-                "सुनिश्चित करें कि पौधा आलू की फसल है।"
+                "सुनिश्चित करें कि पौधा आलू की फसल है।",
             ]
         elif lang == "mr":
             if is_colorless:
@@ -321,7 +495,7 @@ async def predict(
             recoms = [
                 "फोटो वनस्पतींच्या पानाचे प्रत्यक्ष छायाचित्र असल्याचे सुनिश्चित करा.",
                 "आकृती, फ्लोचार्ट किंवा मजकुराचे स्क्रीनशॉट अपलोड करणे टाळा.",
-                "वनस्पती बटाट्याचे पीक असल्याची खात्री करा."
+                "वनस्पती बटाट्याचे पीक असल्याची खात्री करा.",
             ]
         else:
             if is_colorless:
@@ -333,173 +507,166 @@ async def predict(
             recoms = [
                 "Ensure the photo is a real photograph of a plant leaf.",
                 "Avoid uploading diagrams, flowcharts, or screenshots of text.",
-                "Ensure the plant is a potato crop."
+                "Ensure the plant is a potato crop.",
             ]
-        return {
-            "disease": "Invalid Image",
-            "confidence": 0.0,
-            "message": msg,
-            "recommendations": recoms
-        }
+        return {"disease": "Invalid Image", "confidence": 0.0,
+                "message": msg, "recommendations": recoms}
 
-
-
-    # ----------------------------------------------------------
-
-    # 1. Define the cloud API Task
-    async def validate_image():
+    # ------------------------------------------------------------------
+    # Run Gemini vision validation + local TF model in parallel
+    # ------------------------------------------------------------------
+    async def _validate_with_gemini() -> str:
         try:
             prompt = (
                 "Analyze this image. "
                 "1. Is this a real potato plant leaf? (If not, reply 'NOT A LEAF'). "
-                "2. If it IS a potato plant leaf, identify if it has 'Early Blight' (small concentric spots), 'Late Blight' (large dark brown/black water-soaked lesions), or is 'Healthy'. "
-                "Reply strictly in the format: VERDICT: [POTATO/NOT A LEAF] | DISEASE: [Early Blight/Late Blight/Healthy/Unknown]\n"
-                "Do NOT include any extra text, markdown formatting, introductory words, or explanations."
+                "2. If it IS a potato plant leaf, identify if it has 'Early Blight' "
+                "(small concentric spots), 'Late Blight' (large dark brown/black "
+                "water-soaked lesions), or is 'Healthy'. "
+                "Reply strictly in the format: "
+                "VERDICT: [POTATO/NOT A LEAF] | DISEASE: [Early Blight/Late Blight/Healthy/Unknown]\n"
+                "Do NOT include any extra text, markdown, or explanations."
             )
-            # 1. Get a working vision model dynamically
-            model_engine = get_model("vision")
-            
-            # Configure safety settings to be more lenient for agricultural use
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-            
+            engine = get_model("vision")
             resp = await asyncio.to_thread(
-                model_engine.generate_content,
+                engine.generate_content,
                 [prompt, gemini_image],
                 generation_config={"max_output_tokens": 150},
-                safety_settings=safety_settings
+                safety_settings=_SAFETY_SETTINGS,
             )
-            
-            # If the response was blocked, we'll get a finish_reason that isn't STOP (1) or MAX_TOKENS (2)
-            if not resp.candidates or (resp.candidates[0].finish_reason.name not in ["STOP", "MAX_TOKENS"] and resp.candidates[0].finish_reason not in [1, 2]):
-                print(f"Gemini response blocked or empty. Reason: {resp.candidates[0].finish_reason if resp.candidates else 'No candidates'}", flush=True)
-                return "NOT A LEAF" # Better fallback than 'POTATO'
-                
-            text = resp.text.strip().upper()
-            return text
-
+            if not resp.candidates or (
+                resp.candidates[0].finish_reason.name not in ["STOP", "MAX_TOKENS"]
+                and resp.candidates[0].finish_reason not in [1, 2]
+            ):
+                print(
+                    f"Gemini blocked. Reason: "
+                    f"{resp.candidates[0].finish_reason if resp.candidates else 'No candidates'}",
+                    flush=True,
+                )
+                return "NOT A LEAF"
+            return resp.text.strip().upper()
         except Exception as e:
-            # If Gemini API is unavailable (e.g., missing key on deployment),
-            # return a special sentinel so we can apply a tighter local filter
-            print(f"Gemini API unavailable (will apply stricter local filter): {e}", flush=True)
+            print(f"Gemini unavailable (stricter local filter active): {e}", flush=True)
             return "API_UNAVAILABLE"
-            
-    # 2. Define the local TF task (with TTA averaging)
-    def run_local():
+
+    def _run_local() -> np.ndarray:
         all_preds = []
         for variant in tta_variants:
-            preds = model(variant)
+            preds = tf_model(variant)
             if isinstance(preds, dict):
                 preds = list(preds.values())[0]
             all_preds.append(preds.numpy()[0])
-        # Average across all augmented versions for more robust prediction
         return np.mean(all_preds, axis=0)
 
-    # Run BOTH at the EXACT same time!
-    verdict_task = asyncio.create_task(validate_image())
-    local_task = asyncio.to_thread(run_local)
-    
-    verdict, pred_vals = await asyncio.gather(verdict_task, local_task)
-    
-    # Only reject if Gemini explicitly identified it as non-potato (not on API errors)
+    verdict, pred_vals = await asyncio.gather(
+        asyncio.create_task(_validate_with_gemini()),
+        asyncio.to_thread(_run_local),
+    )
+
+    # ------------------------------------------------------------------
+    # Interpret Gemini verdict
+    # ------------------------------------------------------------------
     gemini_unavailable = "API_UNAVAILABLE" in verdict
-    is_potato = "POTATO" in verdict or gemini_unavailable  # treat unavailable as pass-through initially
+    is_potato = "POTATO" in verdict or gemini_unavailable
+
     gemini_disease = "UNKNOWN"
     if "DISEASE:" in verdict:
         gemini_disease = verdict.split("DISEASE:")[1].strip().split("|")[0].strip()
 
-    # When Gemini is offline, apply a STRICTER local color check as a safety net.
-    # The college photo (avg_exg ~ -5 to 0) would pass the -10.0 threshold but fail -2.0.
-    if gemini_unavailable:
-        is_not_green_fallback = avg_exg < -2.0 and not is_colorless
-        if is_not_green_fallback:
-            print(f"Gemini offline + strict local filter triggered: avg_exg={avg_exg:.2f}", flush=True)
-            is_potato = False  # treat as non-leaf
+    # When Gemini is offline, tighten the ExG threshold as a safety net
+    if gemini_unavailable and avg_exg < -2.0 and not is_colorless:
+        print(f"Gemini offline — strict filter blocked image (exg={avg_exg:.1f})", flush=True)
+        is_potato = False
 
     if not is_potato:
-        friendly_message = "This image does not appear to be a potato leaf. Please upload a clear photo of a Potato leaf."
-        recoms = ["Ensure the photo is strictly of a single plant leaf.", "Ensure the plant is a potato crop."]
-        
         if lang == "hi":
-            friendly_message = "यह छवि आलू की पत्ती जैसी नहीं लग रही है। कृपया आलू की पत्ती का स्पष्ट फोटो अपलोड करें।"
-            recoms = ["सुनिश्चित करें कि फोटो केवल एक पौधे की पत्ती का है।", "सुनिश्चित करें कि पौधा आलू की फसल है।"]
+            friendly_msg = "यह छवि आलू की पत्ती जैसी नहीं लग रही है। कृपया आलू की पत्ती का स्पष्ट फोटो अपलोड करें।"
+            recoms = [
+                "सुनिश्चित करें कि फोटो केवल एक पौधे की पत्ती का है।",
+                "सुनिश्चित करें कि पौधा आलू की फसल है।",
+            ]
         elif lang == "mr":
-            friendly_message = "ही प्रतिमा बटाट्याचे पान वाटत नाही. कृपया बटाट्याच्या पानाचा स्पष्ट फोटो अपलोड करा."
-            recoms = ["फोटो केवळ एका वनस्पतीच्या पानाचा असल्याची खात्री करा.", "वनस्पती बटाट्याचे पीक असल्याची खात्री करा."]
+            friendly_msg = "ही प्रतिमा बटाट्याचे पान वाटत नाही. कृपया बटाट्याच्या पानाचा स्पष्ट फोटो अपलोड करा."
+            recoms = [
+                "फोटो केवळ एका वनस्पतीच्या पानाचा असल्याची खात्री करा.",
+                "वनस्पती बटाट्याचे पीक असल्याची खात्री करा.",
+            ]
+        else:
+            friendly_msg = "This image does not appear to be a potato leaf. Please upload a clear photo of a Potato leaf."
+            recoms = [
+                "Ensure the photo is strictly of a single plant leaf.",
+                "Ensure the plant is a potato crop.",
+            ]
+        return {"disease": "Invalid Image", "confidence": 0.0,
+                "message": friendly_msg, "recommendations": recoms}
 
-        return {
-            "disease": "Invalid Image",
-            "confidence": 0.0,
-            "message": friendly_message,
-            "recommendations": recoms
-        }
-
-    # 3. Use the local model prediction
+    # ------------------------------------------------------------------
+    # Final prediction from local TF model
+    # ------------------------------------------------------------------
     index = int(np.argmax(pred_vals))
     confidence = float(np.max(pred_vals)) * 100
-    predicted_class = class_names[index]
+    predicted_class = CLASS_NAMES[index]
 
-    # 4. Smart Override: If local model is unsure or says Early Blight but Gemini is sure it's Late Blight
-    # (Late blight is more dangerous, so we prioritize its detection if Gemini sees it)
+    # Smart override: if Gemini sees Late Blight and local model is not fully certain
     if "LATE BLIGHT" in gemini_disease and confidence < 99.0:
-        print(f"OVERRIDE: Gemini detected Late Blight, local model was {confidence:.2f}% sure of {predicted_class}", flush=True)
+        print(
+            f"OVERRIDE: Gemini → Late Blight | Local → {predicted_class} ({confidence:.1f}%)",
+            flush=True,
+        )
         predicted_class = "Potato___Late_blight"
-        confidence = 95.0 # High confidence for the override
-    
-    # DEBUG: Log raw softmax probabilities to diagnose model calibration
-    print(f"\n--- PREDICTION DEBUG ---", flush=True)
-    for i, cls in enumerate(class_names):
-        print(f"  {cls}: {pred_vals[i]*100:.4f}%", flush=True)
-    print(f"  -> Winner: {predicted_class} ({confidence:.4f}%)", flush=True)
-    print(f"------------------------\n", flush=True)
+        confidence = 95.0
+
+    print(
+        f"RESULT: {predicted_class} ({confidence:.2f}%) | Gemini: {gemini_disease}",
+        flush=True,
+    )
 
     return {
         "disease": predicted_class,
         "confidence": round(confidence, 2),
         "message": translations[predicted_class].get(lang, translations[predicted_class]["en"]),
-        "recommendations": recommendations[predicted_class].get(lang, recommendations[predicted_class]["en"])
+        "recommendations": recommendations[predicted_class].get(
+            lang, recommendations[predicted_class]["en"]
+        ),
     }
 
+
+# ---------------------------------------------------------------------------
+# Translation helper endpoint
+# ---------------------------------------------------------------------------
 @app.get("/translate_disease")
 def translate_disease(disease: str, lang: str = Query("en")):
+    """Returns translated message and recommendations for a given disease."""
     if disease == "Invalid Image":
-        msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
-        recoms = [
-            "Ensure the photo is a real photograph (not a drawing or artwork).",
-            "Ensure the leaf is clearly visible.",
-            "Ensure the plant is a potato crop."
-        ]
-        
         if lang == "hi":
             msg = "यह छवि एक श्वेत-श्याम रेखाचित्र या स्केच प्रतीत होती है, न कि असली पौधे की पत्ती।"
             recoms = [
                 "सुनिश्चित करें कि फोटो एक वास्तविक तस्वीर है (चित्र या स्केच नहीं)।",
                 "सुनिश्चित करें कि पत्ती स्पष्ट रूप से दिखाई दे रही है।",
-                "सुनिश्चित करें कि पौधा आलू की फसल है।"
+                "सुनिश्चित करें कि पौधा आलू की फसल है।",
             ]
         elif lang == "mr":
             msg = "ही प्रतिमा एक कृष्णधवल रेखाचित्र किंवा स्केच वाटते, खरी वनस्पतीची पाने नाही."
             recoms = [
                 "फोटो प्रत्यक्ष छायाचित्र असल्याचे सुनिश्चित करा (रेखाचित्र किंवा कलाकृती नाही).",
                 "पाने स्पष्टपणे दिसत असल्याची खात्री करा.",
-                "वनस्पती बटाट्याचे पीक असल्याची खात्री करा."
+                "वनस्पती बटाट्याचे पीक असल्याची खात्री करा.",
             ]
-            
-        return {
-            "message": msg,
-            "recommendations": recoms
-        }
+        else:
+            msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
+            recoms = [
+                "Ensure the photo is a real photograph (not a drawing or artwork).",
+                "Ensure the leaf is clearly visible.",
+                "Ensure the plant is a potato crop.",
+            ]
+        return {"message": msg, "recommendations": recoms}
 
-    
     if disease not in translations:
         return {"message": "Unknown disease", "recommendations": []}
-        
+
     return {
         "message": translations[disease].get(lang, translations[disease]["en"]),
-        "recommendations": recommendations[disease].get(lang, recommendations[disease]["en"])
+        "recommendations": recommendations[disease].get(
+            lang, recommendations[disease]["en"]
+        ),
     }
-
