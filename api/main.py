@@ -457,11 +457,12 @@ async def predict(
 
     # Excess Green Index — real leaves score ≥ 0, non-plants score negative
     avg_exg = float(np.mean(2.0 * g_ch - r_ch - b_ch))
-    
-    # Blue pixel ratio (fraction of pixels where B is strictly the dominant channel)
-    # Natural potato leaves (healthy or diseased) are almost never blue-dominant.
-    blue_pixels = (b_ch > g_ch) & (b_ch > r_ch)
-    blue_ratio = float(np.mean(blue_pixels))
+
+    # Plant pixel ratio — pixels where R or G dominates B by at least 10 units.
+    # Real leaves (healthy, diseased, brown, yellow) always score > 0.3.
+    # Blue/gray certificates, documents, and solid-blue images score 0.0.
+    plant_pixels = (g_ch > b_ch + 10) | (r_ch > b_ch + 10)
+    plant_ratio = float(np.mean(plant_pixels))
 
     # White/document background
     white_ratio = float(np.mean(np.all(img_np > 200, axis=2)))
@@ -469,11 +470,12 @@ async def predict(
 
     is_colorless        = avg_saturation < 8.0
     is_document         = white_ratio > 0.85 or color_std < 10.0
-    is_not_green_strict = (avg_exg < -10.0 or blue_ratio > 0.3) and not is_colorless
+    # Reject if: ExG is very negative OR almost no "warm/plant" pixels exist
+    is_not_green_strict = (avg_exg < -10.0 or plant_ratio < 0.05) and not is_colorless
 
     print(
         f"PRE-FILTER | exg={avg_exg:.1f} sat={avg_saturation:.1f} "
-        f"white={white_ratio:.2f} std={color_std:.1f} blue_ratio={blue_ratio:.3f}",
+        f"white={white_ratio:.2f} std={color_std:.1f} plant_ratio={plant_ratio:.3f}",
         flush=True,
     )
 
@@ -582,9 +584,10 @@ async def predict(
     if "DISEASE:" in verdict:
         gemini_disease = verdict.split("DISEASE:")[1].strip().split("|")[0].strip()
 
-    # When Gemini is offline, tighten the ExG threshold slightly but allow brown/diseased leaves (exg near 0)
-    if gemini_unavailable and (avg_exg < -5.0 or blue_ratio > 0.3) and not is_colorless:
-        print(f"Gemini offline — strict filter blocked image (exg={avg_exg:.1f}, blue={blue_ratio:.3f})", flush=True)
+    # When Gemini is offline, tighten filter slightly as a safety net.
+    # Allow brown/diseased leaves (plant_ratio > 0.05), block blue/gray non-leaves.
+    if gemini_unavailable and (avg_exg < -5.0 or plant_ratio < 0.05) and not is_colorless:
+        print(f"Gemini offline — strict filter blocked image (exg={avg_exg:.1f}, plant={plant_ratio:.3f})", flush=True)
         is_potato = False
 
     if not is_potato:
