@@ -572,7 +572,11 @@ async def predict(
     # Interpret Gemini verdict
     # ------------------------------------------------------------------
     gemini_unavailable = "API_UNAVAILABLE" in verdict
-    is_potato = "POTATO" in verdict or gemini_unavailable
+    
+    # Gemini might reply "VERDICT: LEAF" or "VERDICT: YES" instead of strictly "POTATO".
+    # It's safer to check if it explicitly said "NOT A LEAF".
+    is_not_a_leaf = "NOT A LEAF" in verdict
+    is_potato = not is_not_a_leaf
 
     gemini_disease = "UNKNOWN"
     if "DISEASE:" in verdict:
