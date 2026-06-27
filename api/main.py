@@ -38,8 +38,8 @@ def get_model(mode="chat"):
 
     # Priority defaults - Use 2.5/2.0/3.5/1.5 Flash for best stability and free-tier quotas
     defaults = {
-        "chat": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-pro"],
-        "vision": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash"] 
+        "chat": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"],
+        "vision": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro-vision"] 
     }
 
     # 1. Try defaults first
@@ -47,7 +47,12 @@ def get_model(mode="chat"):
         try:
             m = genai.GenerativeModel(model_name)
             # Test model with a minimal prompt to verify it's supported and functional
-            m.generate_content("test", generation_config={"max_output_tokens": 1})
+            if mode == "vision":
+                dummy_img = Image.new('RGB', (10, 10))
+                m.generate_content(["test", dummy_img], generation_config={"max_output_tokens": 1})
+            else:
+                m.generate_content("test", generation_config={"max_output_tokens": 1})
+            
             MODEL_CACHE[mode] = m
             print(f"Successfully loaded and verified '{model_name}' for {mode} mode.", flush=True)
             return m
@@ -261,20 +266,18 @@ async def predict(
     G = img_np[:, :, 1]
     B = img_np[:, :, 2]
     
-    # Check: Is there ANY meaningful color variation? 
+    # Check: Is there ANY meaningful color variation?
     # Only rejects truly monochrome images (pure drawings/sketches)
-    # Real leaves — even diseased/dark ones — have some saturation
     max_channel = np.maximum(np.maximum(R, G), B)
     min_channel = np.minimum(np.minimum(R, G), B)
     saturation_map = max_channel - min_channel
     avg_saturation = np.mean(saturation_map)
     
     # Very lenient: only reject if almost completely grayscale (saturation < 8)
-    # A pure black & white pencil drawing scores ~0-5, real photos score 20-80+
     is_colorless = avg_saturation < 8.0
     
     # 1. White/Light Background detection (common in documents)
-    white_mask = np.all(img_np > 200, axis=2) 
+    white_mask = np.all(img_np > 200, axis=2)
     white_ratio = np.mean(white_mask)
     
     # 2. Color Profile check (Potato leaves are primarily green)
@@ -286,38 +289,23 @@ async def predict(
     # 3. Texture/Flatness check
     color_std = np.std(img_np)
     
-    # Heuristic for "Invalid Image" - Restored but lenient
-    # Catch clearly non-leaf images (white documents or grey/skin tones)
-    # avg_exg: Real leaves are green (>0). People/Grey things are < -10.
-    # white_ratio: Documents are > 80% white.
-    is_not_green = avg_exg < -10.0 and not is_colorless 
+    # avg_exg: Real leaves are green (typically > 0).
+    # People/buildings/sky score around -5 to -30.
+    # -10.0 is the strict threshold used when Gemini is available.
+    # A tighter threshold (-2.0) is used as a safety net when Gemini is offline.
+    is_not_green_strict = avg_exg < -10.0 and not is_colorless
     is_document = white_ratio > 0.85 or color_std < 10.0
     
-    if is_colorless or is_document or is_not_green:
-        msg = "The image does not appear to be a plant leaf."
-        if is_colorless:
-            msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
-        elif is_document:
-            msg = "The image appears to be a document or diagram, not a real plant leaf."
-        elif is_not_green:
-            msg = "The image colors do not match a typical plant leaf. Please upload a clear photo of a green leaf."
-            
-        return {
-            "disease": "Invalid Image",
-            "confidence": 0.0,
-            "message": msg,
-            "recommendations": [
-                "Ensure the photo is a real photograph of a plant leaf.",
-                "Avoid uploading diagrams, flowcharts, or screenshots of text.",
-                "Ensure the plant is a potato crop."
-            ]
-        }
-        
+    print(f"DEBUG pre-filter: avg_exg={avg_exg:.2f}, avg_saturation={avg_saturation:.2f}, white_ratio={white_ratio:.2f}, color_std={color_std:.2f}", flush=True)
+    
+    if is_colorless or is_document or is_not_green_strict:
         if lang == "hi":
             if is_colorless:
                 msg = "यह छवि एक श्वेत-श्याम रेखाचित्र या स्केच प्रतीत होती है, न कि असली पौधे की पत्ती।"
-            else:
+            elif is_document:
                 msg = "यह छवि एक दस्तावेज़ या सफ़ेद पृष्ठभूमि वाला आरेख प्रतीत होती है, न कि असली पौधे की पत्ती।"
+            else:
+                msg = "छवि के रंग एक सामान्य पौधे की पत्ती से मेल नहीं खाते। कृपया हरी पत्ती का स्पष्ट फोटो अपलोड करें।"
             recoms = [
                 "सुनिश्चित करें कि फोटो पौधे की पत्ती का वास्तविक छायाचित्र है।",
                 "आरेख, फ्लोचार्ट या टेक्स्ट के स्क्रीनशॉट अपलोड करने से बचें।",
@@ -326,14 +314,27 @@ async def predict(
         elif lang == "mr":
             if is_colorless:
                 msg = "ही प्रतिमा एक कृष्णधवल रेखाचित्र किंवा स्केच वाटते, खरी वनस्पतीची पाने नाही."
-            else:
+            elif is_document:
                 msg = "ही प्रतिमा पांढऱ्या पार्श्वभूमीचा दस्तऐवज किंवा आकृती वाटते, खरी वनस्पतीची पाने नाही."
+            else:
+                msg = "प्रतिमेचे रंग सामान्य वनस्पतींच्या पानांशी जुळत नाहीत. कृपया हिरव्या पानाचा स्पष्ट फोटो अपलोड करा."
             recoms = [
                 "फोटो वनस्पतींच्या पानाचे प्रत्यक्ष छायाचित्र असल्याचे सुनिश्चित करा.",
                 "आकृती, फ्लोचार्ट किंवा मजकुराचे स्क्रीनशॉट अपलोड करणे टाळा.",
                 "वनस्पती बटाट्याचे पीक असल्याची खात्री करा."
             ]
-
+        else:
+            if is_colorless:
+                msg = "The image appears to be a black & white drawing or sketch, not a real plant leaf."
+            elif is_document:
+                msg = "The image appears to be a document or diagram, not a real plant leaf."
+            else:
+                msg = "The image colors do not match a typical plant leaf. Please upload a clear photo of a green leaf."
+            recoms = [
+                "Ensure the photo is a real photograph of a plant leaf.",
+                "Avoid uploading diagrams, flowcharts, or screenshots of text.",
+                "Ensure the plant is a potato crop."
+            ]
         return {
             "disease": "Invalid Image",
             "confidence": 0.0,
@@ -382,9 +383,10 @@ async def predict(
             return text
 
         except Exception as e:
-            # If Gemini is unavailable, skip validation and trust the local model
-            print(f"Gemini API unavailable (skipping validation): {e}", flush=True)
-            return "POTATO"
+            # If Gemini API is unavailable (e.g., missing key on deployment),
+            # return a special sentinel so we can apply a tighter local filter
+            print(f"Gemini API unavailable (will apply stricter local filter): {e}", flush=True)
+            return "API_UNAVAILABLE"
             
     # 2. Define the local TF task (with TTA averaging)
     def run_local():
@@ -404,12 +406,21 @@ async def predict(
     verdict, pred_vals = await asyncio.gather(verdict_task, local_task)
     
     # Only reject if Gemini explicitly identified it as non-potato (not on API errors)
-    is_potato = "POTATO" in verdict
+    gemini_unavailable = "API_UNAVAILABLE" in verdict
+    is_potato = "POTATO" in verdict or gemini_unavailable  # treat unavailable as pass-through initially
     gemini_disease = "UNKNOWN"
     if "DISEASE:" in verdict:
         gemini_disease = verdict.split("DISEASE:")[1].strip().split("|")[0].strip()
 
-    if not is_potato and "API_ERROR" not in verdict:
+    # When Gemini is offline, apply a STRICTER local color check as a safety net.
+    # The college photo (avg_exg ~ -5 to 0) would pass the -10.0 threshold but fail -2.0.
+    if gemini_unavailable:
+        is_not_green_fallback = avg_exg < -2.0 and not is_colorless
+        if is_not_green_fallback:
+            print(f"Gemini offline + strict local filter triggered: avg_exg={avg_exg:.2f}", flush=True)
+            is_potato = False  # treat as non-leaf
+
+    if not is_potato:
         friendly_message = "This image does not appear to be a potato leaf. Please upload a clear photo of a Potato leaf."
         recoms = ["Ensure the photo is strictly of a single plant leaf.", "Ensure the plant is a potato crop."]
         
