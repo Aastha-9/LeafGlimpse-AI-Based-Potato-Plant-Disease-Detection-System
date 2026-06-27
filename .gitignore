@@ -14,3 +14,9 @@ Training/
 
 /models/1/
 tools/ngrok.exe
+
+venv/
+*.rar
+mysql-connector-j-*/
+debug_output.json
+test_*.py

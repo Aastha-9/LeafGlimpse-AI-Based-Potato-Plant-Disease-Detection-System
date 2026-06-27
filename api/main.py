@@ -36,22 +36,23 @@ def get_model(mode="chat"):
     if MODEL_CACHE[mode]:
         return MODEL_CACHE[mode]
 
-    # Priority defaults - Use 1.5 Flash for best stability and free-tier quotas
+    # Priority defaults - Use 2.5/2.0/3.5/1.5 Flash for best stability and free-tier quotas
     defaults = {
-        "chat": ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"],
-        "vision": ["gemini-1.5-flash", "gemini-1.5-flash-latest"] 
+        "chat": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-pro"],
+        "vision": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", "gemini-1.5-flash"] 
     }
-
 
     # 1. Try defaults first
     for model_name in defaults[mode]:
         try:
             m = genai.GenerativeModel(model_name)
-            # We skip the test generation to save quota
+            # Test model with a minimal prompt to verify it's supported and functional
+            m.generate_content("test", generation_config={"max_output_tokens": 1})
             MODEL_CACHE[mode] = m
-            print(f"Successfully loaded '{model_name}' for {mode} mode.", flush=True)
+            print(f"Successfully loaded and verified '{model_name}' for {mode} mode.", flush=True)
             return m
-        except Exception:
+        except Exception as e:
+            print(f"Failed to load/verify default model '{model_name}': {e}", flush=True)
             continue
 
     # 2. If defaults fail, list all available models and find a compatible one
@@ -60,15 +61,15 @@ def get_model(mode="chat"):
         available = genai.list_models()
         for m_info in available:
             if 'generateContent' in m_info.supported_generation_methods:
-                # Basic logic: vision models usually have 'vision' or 'flash' or '1.5' in name
-                is_vision_capable = 'vision' in m_info.name or 'flash' in m_info.name or '1.5' in m_info.name
+                # Basic logic: vision models usually have 'vision' or 'flash' or '1.5' or '2.0' or '2.5' or '3.5' in name
+                is_vision_capable = any(keyword in m_info.name.lower() for keyword in ['vision', 'flash', '1.5', '2.0', '2.5', '3.5'])
                 
                 if (mode == "vision" and is_vision_capable) or (mode == "chat"):
                     try:
                         m = genai.GenerativeModel(m_info.name)
                         m.generate_content("test", generation_config={"max_output_tokens": 1})
                         MODEL_CACHE[mode] = m
-                        print(f"Dynamically discovered and loaded '{m_info.name}' for {mode} mode.", flush=True)
+                        print(f"Dynamically discovered, loaded and verified '{m_info.name}' for {mode} mode.", flush=True)
                         return m
                     except Exception:
                         continue
@@ -289,7 +290,7 @@ async def predict(
     # Catch clearly non-leaf images (white documents or grey/skin tones)
     # avg_exg: Real leaves are green (>0). People/Grey things are < -10.
     # white_ratio: Documents are > 80% white.
-    is_not_green = avg_exg < -40.0 and not is_colorless 
+    is_not_green = avg_exg < -10.0 and not is_colorless 
     is_document = white_ratio > 0.85 or color_std < 10.0
     
     if is_colorless or is_document or is_not_green:
@@ -348,10 +349,11 @@ async def predict(
     async def validate_image():
         try:
             prompt = (
-                "Analyze this image of a potato leaf. "
-                "1. Is this a real potato leaf? (If not, reply 'NOT A LEAF'). "
-                "2. If it IS a potato leaf, identify if it has 'Early Blight' (small concentric spots), 'Late Blight' (large dark brown/black water-soaked lesions), or is 'Healthy'. "
-                "Reply in the format: VERDICT: [POTATO/NOT A LEAF] | DISEASE: [Early Blight/Late Blight/Healthy/Unknown]"
+                "Analyze this image. "
+                "1. Is this a real potato plant leaf? (If not, reply 'NOT A LEAF'). "
+                "2. If it IS a potato plant leaf, identify if it has 'Early Blight' (small concentric spots), 'Late Blight' (large dark brown/black water-soaked lesions), or is 'Healthy'. "
+                "Reply strictly in the format: VERDICT: [POTATO/NOT A LEAF] | DISEASE: [Early Blight/Late Blight/Healthy/Unknown]\n"
+                "Do NOT include any extra text, markdown formatting, introductory words, or explanations."
             )
             # 1. Get a working vision model dynamically
             model_engine = get_model("vision")
@@ -367,12 +369,12 @@ async def predict(
             resp = await asyncio.to_thread(
                 model_engine.generate_content,
                 [prompt, gemini_image],
-                generation_config={"max_output_tokens": 10},
+                generation_config={"max_output_tokens": 150},
                 safety_settings=safety_settings
             )
             
-            # If the response was blocked, we'll get a finish_reason that isn't 1 (SUCCESS)
-            if not resp.candidates or resp.candidates[0].finish_reason != 1:
+            # If the response was blocked, we'll get a finish_reason that isn't STOP (1) or MAX_TOKENS (2)
+            if not resp.candidates or (resp.candidates[0].finish_reason.name not in ["STOP", "MAX_TOKENS"] and resp.candidates[0].finish_reason not in [1, 2]):
                 print(f"Gemini response blocked or empty. Reason: {resp.candidates[0].finish_reason if resp.candidates else 'No candidates'}", flush=True)
                 return "NOT A LEAF" # Better fallback than 'POTATO'
                 
