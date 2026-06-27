@@ -457,6 +457,10 @@ async def predict(
 
     # Excess Green Index — real leaves score ≥ 0, non-plants score negative
     avg_exg = float(np.mean(2.0 * g_ch - r_ch - b_ch))
+    
+    # Green pixel ratio (fraction of pixels where G is strictly the dominant channel)
+    green_pixels = (g_ch > r_ch + 5) & (g_ch > b_ch + 5)
+    green_ratio = float(np.mean(green_pixels))
 
     # White/document background
     white_ratio = float(np.mean(np.all(img_np > 200, axis=2)))
@@ -464,11 +468,11 @@ async def predict(
 
     is_colorless        = avg_saturation < 8.0
     is_document         = white_ratio > 0.85 or color_std < 10.0
-    is_not_green_strict = avg_exg < -10.0 and not is_colorless
+    is_not_green_strict = (avg_exg < -10.0 or green_ratio < 0.01) and not is_colorless
 
     print(
         f"PRE-FILTER | exg={avg_exg:.1f} sat={avg_saturation:.1f} "
-        f"white={white_ratio:.2f} std={color_std:.1f}",
+        f"white={white_ratio:.2f} std={color_std:.1f} green_ratio={green_ratio:.3f}",
         flush=True,
     )
 
@@ -574,8 +578,8 @@ async def predict(
         gemini_disease = verdict.split("DISEASE:")[1].strip().split("|")[0].strip()
 
     # When Gemini is offline, tighten the ExG threshold as a safety net
-    if gemini_unavailable and avg_exg < -2.0 and not is_colorless:
-        print(f"Gemini offline — strict filter blocked image (exg={avg_exg:.1f})", flush=True)
+    if gemini_unavailable and (avg_exg < -2.0 or green_ratio < 0.05) and not is_colorless:
+        print(f"Gemini offline — strict filter blocked image (exg={avg_exg:.1f}, green={green_ratio:.3f})", flush=True)
         is_potato = False
 
     if not is_potato:
