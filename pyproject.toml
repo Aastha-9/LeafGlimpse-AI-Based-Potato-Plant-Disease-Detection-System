@@ -1,0 +1,38 @@
+[tool.pylint.main]
+# Files to ignore
+ignore = ["venv", "node_modules", "build", "dist", "__pycache__", "Training"]
+
+[tool.pylint."messages control"]
+# Disable cosmetic/style warnings that don't affect correctness
+disable = [
+    "C0114",  # missing-module-docstring
+    "C0115",  # missing-class-docstring
+    "C0116",  # missing-function-docstring
+    "C0301",  # line-too-long
+    "C0302",  # too-many-lines
+    "C0303",  # trailing-whitespace
+    "R0914",  # too-many-locals
+    "R0912",  # too-many-branches
+    "R0915",  # too-many-statements
+    "W0611",  # unused-import (handled by isort)
+    "W0621",  # redefined-outer-name
+    "W0703",  # broad-except
+    "E0401",  # import-error (false positives for venv packages)
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.isort]
+profile = "black"
+skip = ["venv", "node_modules"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "off"
+reportMissingModuleSource = "none"
+
+[tool.flake8]
+max-line-length = 120
+ignore = ["E203", "W503", "E501"]
+exclude = ["venv", "node_modules", "__pycache__", "build", "dist"]
