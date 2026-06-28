@@ -17,10 +17,9 @@ build/
 venv/
 .venv/
 env/
-.env/
 
 # ==============================
-# Environment / secrets
+# Environment / Secrets
 # ==============================
 .env
 *.env.local
@@ -38,7 +37,7 @@ env/
 /models/1/
 
 # ==============================
-# Jupyter notebooks
+# Jupyter Notebooks
 # ==============================
 .ipynb_checkpoints/
 *.ipynb
@@ -68,10 +67,11 @@ Training/
 Training.rar
 
 # ==============================
-# Test & debug files
+# Test & Debug files
 # ==============================
 test_*.py
 debug_output.json
+scratch/
 
 # ==============================
 # Node / React
